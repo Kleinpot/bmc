@@ -4,6 +4,8 @@ workflows:
     max_build_duration: 30
     instance_type: mac_mini_m1
     environment:
+      groups:
+        - supabase_group
       flutter: stable
     scripts:
       - name: Get Flutter packages
@@ -11,8 +13,8 @@ workflows:
           flutter packages pub get
       - name: Build APK
         script: |
-          : "${SUPABASE_URL:?Set SUPABASE_URL in Codemagic environment variables}"
-          : "${SUPABASE_ANON_KEY:?Set SUPABASE_ANON_KEY in Codemagic environment variables}"
-          flutter build apk --release --dart-define="SUPABASE_URL=${SUPABASE_URL}" --dart-define="SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}"
+          flutter build apk --release \
+            --dart-define=SUPABASE_URL=$SUPABASE_URL \
+            --dart-define=SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY
     artifacts:
       - build/app/outputs/flutter-apk/*.apk
