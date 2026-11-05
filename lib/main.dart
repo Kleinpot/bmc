@@ -5,23 +5,21 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  const supabaseUrl = String.fromEnvironment('SUPABASE_URL');
+  const supabaseAnonKey = String.fromEnvironment('SUPABASE_ANON_KEY');
   var supabaseConfigured = false;
   String? initializationError;
 
-  try {
-    await Supabase.initialize(
-      url: const String.fromEnvironment(
-        'SUPABASE_URL',
-        defaultValue: 'https://acihoqulcvgsibgmvrfj.supabase.co',
-      ),
-      anonKey: const String.fromEnvironment(
-        'SUPABASE_ANON_KEY',
-        defaultValue: 'sb_publishable_IL5f8sscSAFX4R4mEpGo8A_zx95WKIM',
-      ),
-    );
-    supabaseConfigured = true;
-  } catch (error) {
-    initializationError = 'Could not connect to Supabase: $error';
+  if (supabaseUrl.isEmpty || supabaseAnonKey.isEmpty) {
+    initializationError =
+        'Add your Supabase project URL and publishable (anon) key to run authentication.';
+  } else {
+    try {
+      await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
+      supabaseConfigured = true;
+    } catch (error) {
+      initializationError = 'Could not connect to Supabase: $error';
+    }
   }
 
   runApp(
@@ -83,11 +81,99 @@ class _AuthenticationGate extends StatelessWidget {
     return StreamBuilder<AuthState>(
       stream: auth.onAuthStateChange,
       builder: (context, snapshot) {
-        final session = snapshot.hasData
-            ? snapshot.data!.session
-            : auth.currentSession;
+        final session = snapshot.data?.session ?? auth.currentSession;
         if (session == null) return const _AuthenticationPage();
-        return StorefrontPage(key: ValueKey(session.user.id));
+        return _ProfileRoleGate(
+          key: ValueKey(session.user.id),
+          userId: session.user.id,
+        );
+      },
+    );
+  }
+}
+
+class _ProfileRoleGate extends StatefulWidget {
+  const _ProfileRoleGate({super.key, required this.userId});
+
+  final String userId;
+
+  @override
+  State<_ProfileRoleGate> createState() => _ProfileRoleGateState();
+}
+
+class _ProfileRoleGateState extends State<_ProfileRoleGate> {
+  late Future<String> _roleRequest;
+
+  @override
+  void initState() {
+    super.initState();
+    _roleRequest = _fetchRole();
+  }
+
+  Future<String> _fetchRole() async {
+    final profile = await Supabase.instance.client
+        .from('profiles')
+        .select('role')
+        .eq('id', widget.userId)
+        .maybeSingle();
+    if (profile == null) {
+      throw StateError('No profile found for this account.');
+    }
+    final role = profile['role'];
+    if (role is! String || role.isEmpty) {
+      throw StateError('The account profile does not have a valid role.');
+    }
+    return role;
+  }
+
+  void _retry() {
+    setState(() => _roleRequest = _fetchRole());
+  }
+
+  Future<void> _signOut() async {
+    await Supabase.instance.client.auth.signOut();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<String>(
+      future: _roleRequest,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            backgroundColor: _paper,
+            body: Center(child: CircularProgressIndicator(color: _gold)),
+          );
+        }
+        if (snapshot.hasError) {
+          return Scaffold(
+            backgroundColor: _paper,
+            body: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'Could not load your account role. Check the profiles table and try again.',
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 12),
+                    OutlinedButton(
+                      onPressed: _retry,
+                      child: const Text('RETRY'),
+                    ),
+                    TextButton(
+                      onPressed: _signOut,
+                      child: const Text('SIGN OUT'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }
+        return StorefrontPage(isAdmin: snapshot.data == 'admin');
       },
     );
   }
@@ -141,6 +227,7 @@ class _SupabaseSetupPage extends StatelessWidget {
 
 class Perfume {
   const Perfume({
+    this.id,
     required this.name,
     required this.house,
     required this.price,
@@ -153,6 +240,7 @@ class Perfume {
     this.label,
   });
 
+  final String? id;
   final String name;
   final String house;
   final int price;
@@ -163,9 +251,25 @@ class Perfume {
   final List<String> notes;
   final String longevity;
   final String? label;
+
+  factory Perfume.fromRow(Map<String, dynamic> row) {
+    return Perfume(
+      id: row['id'] as String,
+      name: row['name'] as String,
+      house: row['house'] as String,
+      price: (row['price'] as num).toInt(),
+      family: row['family'] as String,
+      image: row['image'] as String,
+      tint: Color(int.parse(row['tint'] as String, radix: 16)),
+      description: row['description'] as String,
+      notes: List<String>.from(row['notes'] as List),
+      longevity: row['longevity'] as String,
+      label: row['label'] as String?,
+    );
+  }
 }
 
-const _perfumes = [
+const _defaultPerfumes = [
   Perfume(
     name: 'Santal 33',
     house: 'LE LABO',
@@ -353,7 +457,9 @@ const _perfumes = [
 ];
 
 class StorefrontPage extends StatefulWidget {
-  const StorefrontPage({super.key});
+  const StorefrontPage({super.key, required this.isAdmin});
+
+  final bool isAdmin;
 
   @override
   State<StorefrontPage> createState() => _StorefrontPageState();
@@ -364,9 +470,20 @@ class _StorefrontPageState extends State<StorefrontPage> {
   final _searchController = TextEditingController();
   final Set<String> _favorites = {};
   final Map<String, int> _cart = {};
+  List<Perfume> _perfumes = _defaultPerfumes;
   String _selectedFamily = 'All';
   String _searchQuery = '';
   bool _searchOpen = false;
+  bool _isLoadingProducts = true;
+  String? _productLoadError;
+
+  bool get _isAdmin => widget.isAdmin;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadProducts();
+  }
 
   int get _cartCount => _cart.values.fold(0, (total, count) => total + count);
 
@@ -378,6 +495,49 @@ class _StorefrontPageState extends State<StorefrontPage> {
   }
 
   String get _userFirstName => _userFullName.split(RegExp(r'\s+')).first;
+
+  Future<void> _loadProducts() async {
+    if (mounted) {
+      setState(() {
+        _isLoadingProducts = true;
+        _productLoadError = null;
+      });
+    }
+    try {
+      final rows = await Supabase.instance.client
+          .from('products')
+          .select()
+          .order('name');
+      final products = (rows as List<dynamic>)
+          .map((row) => Perfume.fromRow(Map<String, dynamic>.from(row as Map)))
+          .toList();
+      if (!mounted) return;
+      setState(() {
+        _perfumes = products;
+        _cart.removeWhere(
+          (name, quantity) => !products.any((product) => product.name == name),
+        );
+        _favorites.removeWhere(
+          (name) => !products.any((product) => product.name == name),
+        );
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _perfumes = [];
+        _productLoadError = 'Unable to load products: $error';
+      });
+    } finally {
+      if (mounted) setState(() => _isLoadingProducts = false);
+    }
+  }
+
+  Future<void> _manageProducts() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(builder: (context) => const _AdminProductsPage()),
+    );
+    if (mounted) await _loadProducts();
+  }
 
   List<Perfume> get _visiblePerfumes {
     return _perfumes.where((perfume) {
@@ -989,6 +1149,12 @@ class _StorefrontPageState extends State<StorefrontPage> {
                     ),
                   ),
                 ),
+                if (_isAdmin && isWide)
+                  IconButton(
+                    tooltip: 'Manage products',
+                    onPressed: _manageProducts,
+                    icon: const Icon(Icons.admin_panel_settings_outlined),
+                  ),
                 IconButton(
                   tooltip: _searchOpen ? 'Close search' : 'Search fragrances',
                   onPressed: () => setState(() {
@@ -1066,6 +1232,19 @@ class _StorefrontPageState extends State<StorefrontPage> {
               ],
             ),
           ),
+          if (_isAdmin && !isWide)
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                onPressed: _manageProducts,
+                icon: const Icon(Icons.admin_panel_settings_outlined, size: 18),
+                label: const Text('MANAGE PRODUCTS'),
+                style: TextButton.styleFrom(
+                  foregroundColor: _ink,
+                  textStyle: const TextStyle(fontSize: 9, letterSpacing: 0.8),
+                ),
+              ),
+            ),
           if (_searchOpen)
             Padding(
               padding: const EdgeInsets.only(bottom: 14),
@@ -1366,7 +1545,32 @@ class _StorefrontPageState extends State<StorefrontPage> {
           const SizedBox(height: 30),
           _buildFilters(isWide),
           const SizedBox(height: 22),
-          if (products.isEmpty)
+          if (_isLoadingProducts)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 54),
+              child: Center(child: CircularProgressIndicator(color: _gold)),
+            )
+          else if (_productLoadError != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 36),
+              child: Center(
+                child: Column(
+                  children: [
+                    Text(
+                      _productLoadError!,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: _muted),
+                    ),
+                    const SizedBox(height: 12),
+                    OutlinedButton(
+                      onPressed: _loadProducts,
+                      child: const Text('TRY AGAIN'),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else if (products.isEmpty)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 54),
               child: Center(
@@ -3427,6 +3631,411 @@ class _AppExplainerVideoState extends State<AppExplainerVideo> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _AdminProductsPage extends StatefulWidget {
+  const _AdminProductsPage();
+
+  @override
+  State<_AdminProductsPage> createState() => _AdminProductsPageState();
+}
+
+class _AdminProductsPageState extends State<_AdminProductsPage> {
+  List<Perfume> _products = [];
+  bool _isLoading = true;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadProducts();
+  }
+
+  Future<void> _loadProducts() async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+    try {
+      final rows = await Supabase.instance.client
+          .from('products')
+          .select()
+          .order('name');
+      final products = (rows as List<dynamic>)
+          .map((row) => Perfume.fromRow(Map<String, dynamic>.from(row as Map)))
+          .toList();
+      if (mounted) setState(() => _products = products);
+    } catch (error) {
+      if (mounted)
+        setState(() => _errorMessage = 'Unable to load products: $error');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _addProduct() async {
+    final product = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (context) => const _ProductEditorDialog(),
+    );
+    if (product == null || !mounted) return;
+
+    try {
+      final row = await Supabase.instance.client
+          .from('products')
+          .insert(product)
+          .select()
+          .single();
+      final added = Perfume.fromRow(Map<String, dynamic>.from(row));
+      if (mounted) {
+        setState(() {
+          _products = [..._products, added]
+            ..sort((first, second) => first.name.compareTo(second.name));
+        });
+        _showMessage('${added.name} added to the collection.');
+      }
+    } catch (error) {
+      if (mounted) _showMessage('Unable to add product: $error');
+    }
+  }
+
+  Future<void> _editProduct(Perfume existing) async {
+    final changes = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (context) => _ProductEditorDialog(product: existing),
+    );
+    if (changes == null || !mounted) return;
+
+    try {
+      final row = await Supabase.instance.client
+          .from('products')
+          .update(changes)
+          .eq('id', existing.id!)
+          .select()
+          .single();
+      final updated = Perfume.fromRow(Map<String, dynamic>.from(row));
+      if (mounted) {
+        setState(() {
+          _products = [
+            for (final product in _products)
+              if (product.id == updated.id) updated else product,
+          ]..sort((first, second) => first.name.compareTo(second.name));
+        });
+        _showMessage('${updated.name} updated.');
+      }
+    } catch (error) {
+      if (mounted) _showMessage('Unable to update product: $error');
+    }
+  }
+
+  Future<void> _removeProduct(Perfume product) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: _paper,
+        title: const Text('Remove product?'),
+        content: Text('Remove ${product.name} from the collection?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('CANCEL'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: _primaryButtonStyle(),
+            child: const Text('REMOVE'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await Supabase.instance.client
+          .from('products')
+          .delete()
+          .eq('id', product.id!);
+      if (mounted) {
+        setState(() => _products.removeWhere((item) => item.id == product.id));
+        _showMessage('${product.name} removed from the collection.');
+      }
+    } catch (error) {
+      if (mounted) _showMessage('Unable to remove product: $error');
+    }
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+      );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: _paper,
+      appBar: AppBar(
+        backgroundColor: _paper,
+        title: const Text(
+          'MANAGE PRODUCTS',
+          style: TextStyle(fontSize: 12, letterSpacing: 1.8),
+        ),
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _addProduct,
+        backgroundColor: _ink,
+        foregroundColor: _paper,
+        icon: const Icon(Icons.add),
+        label: const Text('ADD PRODUCT'),
+      ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator(color: _gold))
+          : _errorMessage != null
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(_errorMessage!, textAlign: TextAlign.center),
+                    const SizedBox(height: 12),
+                    OutlinedButton(
+                      onPressed: _loadProducts,
+                      child: const Text('TRY AGAIN'),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          : _products.isEmpty
+          ? const Center(
+              child: Text('No products yet. Add your first product.'),
+            )
+          : ListView.separated(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 92),
+              itemCount: _products.length,
+              separatorBuilder: (context, index) =>
+                  const Divider(color: _line, height: 1),
+              itemBuilder: (context, index) {
+                final product = _products[index];
+                return ListTile(
+                  contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                  leading: SizedBox(
+                    width: 52,
+                    height: 64,
+                    child: _PerfumeImage(perfume: product),
+                  ),
+                  title: Text(product.name),
+                  subtitle: Text('${product.house}  ·  ₱${product.price}'),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        tooltip: 'Edit ${product.name}',
+                        onPressed: () => _editProduct(product),
+                        icon: const Icon(Icons.edit_outlined),
+                      ),
+                      IconButton(
+                        tooltip: 'Remove ${product.name}',
+                        onPressed: () => _removeProduct(product),
+                        icon: const Icon(Icons.delete_outline),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+    );
+  }
+}
+
+class _ProductEditorDialog extends StatefulWidget {
+  const _ProductEditorDialog({this.product});
+
+  final Perfume? product;
+
+  @override
+  State<_ProductEditorDialog> createState() => _ProductEditorDialogState();
+}
+
+class _ProductEditorDialogState extends State<_ProductEditorDialog> {
+  final _formKey = GlobalKey<FormState>();
+  final _nameController = TextEditingController();
+  final _houseController = TextEditingController();
+  final _priceController = TextEditingController();
+  final _imageController = TextEditingController();
+  final _descriptionController = TextEditingController();
+  final _notesController = TextEditingController();
+  final _longevityController = TextEditingController();
+  final _labelController = TextEditingController();
+  String _family = 'Floral';
+
+  @override
+  void initState() {
+    super.initState();
+    final product = widget.product;
+    if (product == null) return;
+    _nameController.text = product.name;
+    _houseController.text = product.house;
+    _priceController.text = product.price.toString();
+    _imageController.text = product.image;
+    _descriptionController.text = product.description;
+    _notesController.text = product.notes.join(', ');
+    _longevityController.text = product.longevity;
+    _labelController.text = product.label ?? '';
+    _family = product.family;
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _houseController.dispose();
+    _priceController.dispose();
+    _imageController.dispose();
+    _descriptionController.dispose();
+    _notesController.dispose();
+    _longevityController.dispose();
+    _labelController.dispose();
+    super.dispose();
+  }
+
+  String? _required(String? value) =>
+      value == null || value.trim().isEmpty ? 'This field is required.' : null;
+
+  void _submit() {
+    if (!_formKey.currentState!.validate()) return;
+    final label = _labelController.text.trim();
+    Navigator.pop(context, <String, dynamic>{
+      'name': _nameController.text.trim(),
+      'house': _houseController.text.trim(),
+      'price': int.parse(_priceController.text.trim()),
+      'family': _family,
+      'image': _imageController.text.trim(),
+      'tint': widget.product?.tint.value
+              .toRadixString(16)
+              .padLeft(8, '0')
+              .toUpperCase() ??
+          'FFE6DFD2',
+      'description': _descriptionController.text.trim(),
+      'notes': _notesController.text
+          .split(',')
+          .map((note) => note.trim())
+          .where((note) => note.isNotEmpty)
+          .toList(),
+      'longevity': _longevityController.text.trim(),
+      'label': label.isEmpty ? null : label,
+    });
+  }
+
+  Widget _textField(
+    TextEditingController controller,
+    String label, {
+    String? hint,
+    int maxLines = 1,
+    String? Function(String?)? validator,
+    TextInputType? keyboardType,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: TextFormField(
+        controller: controller,
+        maxLines: maxLines,
+        keyboardType: keyboardType,
+        validator: validator ?? _required,
+        decoration: InputDecoration(
+          labelText: label,
+          hintText: hint,
+          border: const OutlineInputBorder(),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: _paper,
+      title: Text(widget.product == null ? 'Add product' : 'Edit product'),
+      content: SizedBox(
+        width: 440,
+        child: Form(
+          key: _formKey,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _textField(_nameController, 'Product name'),
+                _textField(_houseController, 'Brand / house'),
+                _textField(
+                  _priceController,
+                  'Price (₱)',
+                  keyboardType: TextInputType.number,
+                  validator: (value) {
+                    final price = int.tryParse(value?.trim() ?? '');
+                    if (price == null || price <= 0) {
+                      return 'Enter a price greater than zero.';
+                    }
+                    return null;
+                  },
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: DropdownButtonFormField<String>(
+                    initialValue: _family,
+                    decoration: const InputDecoration(
+                      labelText: 'Scent family',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: const ['Floral', 'Woody', 'Fresh', 'Amber'].map((
+                      family,
+                    ) {
+                      return DropdownMenuItem(
+                        value: family,
+                        child: Text(family),
+                      );
+                    }).toList(),
+                    onChanged: (family) {
+                      if (family != null) setState(() => _family = family);
+                    },
+                  ),
+                ),
+                _textField(
+                  _imageController,
+                  'Unsplash image ID',
+                  hint: 'photo-...',
+                ),
+                _textField(_descriptionController, 'Description', maxLines: 3),
+                _textField(
+                  _notesController,
+                  'Notes',
+                  hint: 'Bergamot, rose, musk',
+                ),
+                _textField(_longevityController, 'Longevity'),
+                _textField(
+                  _labelController,
+                  'Badge (optional)',
+                  validator: (value) => null,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('CANCEL'),
+        ),
+        FilledButton(
+          onPressed: _submit,
+          style: _primaryButtonStyle(),
+          child: Text(widget.product == null ? 'ADD PRODUCT' : 'SAVE CHANGES'),
+        ),
+      ],
     );
   }
 }
