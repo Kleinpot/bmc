@@ -12,7 +12,10 @@ workflows:
         script: flutter pub get
       - name: Build APK
         script: |
-          echo "Using Supabase URL: $SUPABASE_URL"
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_ANON_KEY" ]; then
+            echo "SUPABASE_URL and SUPABASE_ANON_KEY must be set in the supabase_group environment group."
+            exit 1
+          fi
           flutter build apk --release \
             --dart-define=SUPABASE_URL="$SUPABASE_URL" \
             --dart-define=SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY"

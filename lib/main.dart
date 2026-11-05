@@ -3,28 +3,24 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-const _supabaseUrl = String.fromEnvironment(
-  'SUPABASE_URL',
-  defaultValue: 'https://YOUR_PROJECT.supabase.co',
-);
-const _supabaseAnonKey = String.fromEnvironment(
-  'SUPABASE_ANON_KEY',
-  defaultValue: 'YOUR_SUPABASE_ANON_KEY',
-);
+const _supabaseUrl = String.fromEnvironment('SUPABASE_URL');
+const _supabaseAnonKey = String.fromEnvironment('SUPABASE_ANON_KEY');
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   var supabaseConfigured = false;
   String? initializationError;
 
-  if (!_supabaseUrl.contains('YOUR_PROJECT') &&
-      _supabaseAnonKey != 'YOUR_SUPABASE_ANON_KEY') {
+  if (_supabaseUrl.isNotEmpty && _supabaseAnonKey.isNotEmpty) {
     try {
       await Supabase.initialize(url: _supabaseUrl, anonKey: _supabaseAnonKey);
       supabaseConfigured = true;
     } catch (error) {
       initializationError = 'Could not connect to Supabase: $error';
     }
+  } else {
+    initializationError =
+        'SUPABASE_URL and SUPABASE_ANON_KEY must be provided at build time.';
   }
 
   runApp(
