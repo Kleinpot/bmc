@@ -1,0 +1,2 @@
+[functions.xendit-return]
+verify_jwt = false
